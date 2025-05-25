@@ -1,3 +1,2 @@
-data/*
-!data/*.py
-!data/*.txt
+BraTS2019/*
+*.h5
