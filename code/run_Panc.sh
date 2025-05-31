@@ -5,8 +5,9 @@ python train_DyCON_Pancreas.py \
 --root_dir "../data/Pancreas" \
 --exp "PancreasCT" \
 --model "unet_3D" \
---max_iterations 20000 \
+--max_iterations 0 \
 --temp 0.6 \
 --batch_size 8 \
 --labelnum 12 \
 --gpu_id 3
+
