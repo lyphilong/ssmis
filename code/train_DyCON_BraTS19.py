@@ -230,8 +230,10 @@ if __name__ == "__main__":
 
             # Log input shapes to encoder
             with open(snapshot_path + "/log.txt", "a") as f:
-                f.write(f"[Input to student encoder] volume_batch.shape: {volume_batch.shape}\n")
-                f.write(f"[Input to teacher encoder] ema_inputs.shape: {ema_inputs.shape}\n")
+                f.write(f"[Input to student encoder] Unlabeled input Xsj (volume_batch): {volume_batch.shape}\n")
+                f.write(f"[Input to student encoder] Labeled input Xi (label_batchbatch): {label_batch.shape}\n")
+
+                f.write(f"[Input to teacher encoder] Unlabeled input Xtj (ema_inputs= volume_batch + noise) ema_inputs.shape: {ema_inputs.shape}\n")
 
             # === 7. Forward student/teacher model (khối giữa hình) ===
             _, stud_logits, stud_features = model(volume_batch) # Student: logits, features
@@ -240,10 +242,11 @@ if __name__ == "__main__":
 
             # Log output shapes from decoder
             with open(snapshot_path + "/log.txt", "a") as f:
-                f.write(f"[Output from student decoder] stud_logits.shape: {stud_logits.shape}\n")
-                f.write(f"[Output from teacher decoder] ema_logits.shape: {ema_logits.shape}\n")
-                f.write(f"[Student features] stud_features.shape: {stud_features.shape}\n")
-                f.write(f"[Teacher features] ema_features.shape: {ema_features.shape}\n")
+                f.write(f"[Output from student decoder] Ps (stud_logits): {stud_logits.shape}\n")
+                f.write(f"[Student features] Fs (stud_features): {stud_features.shape}\n")
+
+                f.write(f"[Output from teacher decoder] Pt (ema_logits): {ema_logits.shape}\n")
+                f.write(f"[Teacher features] Ft (ema_features): {ema_features.shape}\n")
            
             stud_probs = F.softmax(stud_logits, dim=1)
             ema_probs = F.softmax(ema_logits, dim=1)
@@ -276,9 +279,10 @@ if __name__ == "__main__":
 
             # Log input shapes to LFeCL
             with open(snapshot_path + "/log.txt", "a") as f:
-                f.write(f"[Input to LFeCL] stud_embedding.shape: {stud_embedding.shape}, mask_con.shape: {mask_con.shape}\n")
-                if args.use_teacher_loss:
-                    f.write(f"[Input to LFeCL] teacher_feat.shape: {ema_embedding.shape}\n")
+                f.write(f"[Input to LFeCL - student_branch] Hgs(Ps) (stud_embedding): {stud_embedding.shape}, mask_con.shape: {mask_con.shape}\n")
+                f.write(f"[Input to LFeCL - student_branch] Psi Pred maskmask: {mask_con.shape}\n")
+            
+                
 
             # --- (Tùy chọn) Vẽ biểu đồ similarity giữa embedding và mask ---
             if iter_num % 200 == 0:
@@ -288,6 +292,10 @@ if __name__ == "__main__":
 
             # --- FeCLoss: contrastive loss với hard negative mining (khối xanh lá, L_FeCL) ---
             teacher_feat = ema_embedding if args.use_teacher_loss else None
+
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Input to LFeCL - teacher_branch] teacher_feat.shape: {ema_embedding.shape}\n")
+                
             f_loss = fecl_criterion(feat=stud_embedding,
                                     mask=mask_con, 
                                     teacher_feat=teacher_feat,
