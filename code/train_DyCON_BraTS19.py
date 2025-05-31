@@ -54,7 +54,10 @@ parser.add_argument('--in_ch', type=int, default=1, help='Number of input channe
 parser.add_argument('--num_classes', type=int, default=2, help='Number of segmentation classes')
 parser.add_argument('--feature_scaler', type=int, default=2, help='Feature scaling factor for contrastive loss')
 
-parser.add_argument('--max_iterations', type=int, default=20000, help='Maximum number of training iterations')
+#parser.add_argument('--max_iterations', type=int, default=20000, help='Maximum number of training iterations')
+#New iterations 
+parser.add_argument('--max_iterations', type=int, default=0, help='Maximum number of training iterations')
+
 parser.add_argument('--batch_size', type=int, default=8, help='Total batch size per GPU')
 parser.add_argument('--labeled_bs', type=int, default=4, help='Labeled batch size per GPU')
 parser.add_argument('--base_lr', type=float, default=0.01, help='Base learning rate')
@@ -225,10 +228,22 @@ if __name__ == "__main__":
             noise = torch.clamp(torch.randn_like(volume_batch) * 0.1, -0.2, 0.2) # Augmentation cho teacher
             ema_inputs = volume_batch + noise
 
+            # Log input shapes to encoder
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Input to student encoder] volume_batch.shape: {volume_batch.shape}\n")
+                f.write(f"[Input to teacher encoder] ema_inputs.shape: {ema_inputs.shape}\n")
+
             # === 7. Forward student/teacher model (khối giữa hình) ===
             _, stud_logits, stud_features = model(volume_batch) # Student: logits, features
             with torch.no_grad():
                 _, ema_logits, ema_features = ema_model(ema_inputs) # Teacher: logits, features
+
+            # Log output shapes from decoder
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Output from student decoder] stud_logits.shape: {stud_logits.shape}\n")
+                f.write(f"[Output from teacher decoder] ema_logits.shape: {ema_logits.shape}\n")
+                f.write(f"[Student features] stud_features.shape: {stud_features.shape}\n")
+                f.write(f"[Teacher features] ema_features.shape: {ema_features.shape}\n")
            
             stud_probs = F.softmax(stud_logits, dim=1)
             ema_probs = F.softmax(ema_logits, dim=1)
@@ -236,6 +251,10 @@ if __name__ == "__main__":
             
             # === 8. Tính các loss ===
             # --- Supervised loss (khối đỏ, L_Dice + L_CE) ---
+            # Log input shapes to Dice/CE loss
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Input to Dice/CE] stud_logits[:labeled_bs].shape: {stud_logits[:labeled_bs].shape}, label_batch[:labeled_bs].shape: {label_batch[:labeled_bs].shape}\n")
+                f.write(f"[Input to Dice] stud_probs[:labeled_bs, 1, :, :, :].shape: {stud_probs[:labeled_bs, 1, :, :, :].shape}, label_batch[:labeled_bs] == 1 shape: {(label_batch[:labeled_bs] == 1).shape}\n")
             loss_seg = F.cross_entropy(stud_logits[:labeled_bs], label_batch[:labeled_bs]) # CrossEntropy cho labeled
             loss_seg_dice = losses.dice_loss(stud_probs[:labeled_bs, 1, :, :, :], label_batch[:labeled_bs] == 1) # Dice cho labeled
             
@@ -255,6 +274,12 @@ if __name__ == "__main__":
             mask_con = mask_con.reshape(B, -1)
             mask_con = mask_con.unsqueeze(1) 
 
+            # Log input shapes to LFeCL
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Input to LFeCL] stud_embedding.shape: {stud_embedding.shape}, mask_con.shape: {mask_con.shape}\n")
+                if args.use_teacher_loss:
+                    f.write(f"[Input to LFeCL] teacher_feat.shape: {ema_embedding.shape}\n")
+
             # --- (Tùy chọn) Vẽ biểu đồ similarity giữa embedding và mask ---
             if iter_num % 200 == 0:
                 path2save = os.path.join(snapshot_path, 'BraTS19_similarity')
@@ -269,6 +294,9 @@ if __name__ == "__main__":
                                     gambling_uncertainty=None, # gambling_uncertainty
                                     epoch=epoch_num)
             # --- UnCLoss: contrastive loss cho unlabeled (khối xanh lá, L_UnCL) ---
+            # Log input shapes to LUnCL
+            with open(snapshot_path + "/log.txt", "a") as f:
+                f.write(f"[Input to LUnCL] stud_logits.shape: {stud_logits.shape}, ema_logits.shape: {ema_logits.shape}\n")
             u_loss = uncl_criterion(stud_logits, ema_logits, beta)
             # --- Consistency loss giữa student/teacher (khối xanh dương nhạt) ---
             consistency_loss = consistency_criterion(stud_probs[labeled_bs:], ema_probs[labeled_bs:]).mean()
