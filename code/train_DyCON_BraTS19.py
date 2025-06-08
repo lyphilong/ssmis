@@ -425,7 +425,8 @@ if __name__ == "__main__":
                     topo_loss = torch.tensor(0.0).cuda()
             
             # Gather losses
-            loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
+            #loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
+            loss = args.l_weight * (loss_seg + loss_seg_dice) +  args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
 
             # === 9. Backward, update model ===
             if torch.isnan(loss) or torch.isinf(loss):
