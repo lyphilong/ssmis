@@ -20239,3 +20239,21 @@
 [02:03:39.917] Iteration 19999 : Loss : 1.455299, Loss_CE: 0.012597, Loss_Dice: 0.040610, UnCLoss: 0.018379, FeCLoss: 2.785728, mean_dice: 0.712178, mean_hd95: 26.108537
 [02:03:41.584] Iteration 20000 : Loss : 1.165827, Loss_CE: 0.017470, Loss_Dice: 0.087156, UnCLoss: 0.013756, FeCLoss: 2.108622, mean_dice: 0.570167, mean_hd95: 46.887422
 [02:04:05.605] Iteration 20000 : Dice: 0.834298 Best_dice: 0.836700
+[07:11:02.322] Namespace(base_lr=0.01, batch_size=8, beta_max=5.0, beta_min=0.5, consistency=0.1, consistency_rampup=200.0, consistency_type='mse', deterministic=1, ema_decay=0.99, exp='BraTS2019', feature_scaler=2, gamma=2.0, gpu_id='0', in_ch=1, l_weight=1.0, labeled_bs=4, labelnum=25, max_iterations=20000, model='unet_3D', num_classes=2, patch_size=(96, 96, 96), root_dir='../data/BraTS2019', s_beta=None, seed=1337, temp=0.6, u_weight=0.5, use_focal=1, use_teacher_loss=1)
+[07:11:03.001] Total params of model: 6.15M
+[07:11:03.011] 6 Itertations per epoch
+[07:11:17.272] Iteration 1 : Loss : 5.683327, Loss_CE: 0.893594, Loss_Dice: 0.885463, UnCLoss: 5.820937, FeCLoss: 1.987575, mean_dice: 0.047499, mean_hd95: 108.246214
+[07:11:19.440] Iteration 2 : Loss : 6.169172, Loss_CE: 0.887160, Loss_Dice: 0.887057, UnCLoss: 5.928991, FeCLoss: 2.860903, mean_dice: 0.042096, mean_hd95: 105.243748
+[07:11:21.992] Iteration 3 : Loss : 6.832364, Loss_CE: 0.839426, Loss_Dice: 0.804433, UnCLoss: 5.959938, FeCLoss: 4.417057, mean_dice: 0.134477, mean_hd95: 74.333945
+[07:11:23.867] Iteration 4 : Loss : 5.730296, Loss_CE: 0.859683, Loss_Dice: 0.984211, UnCLoss: 5.986725, FeCLoss: 1.786063, mean_dice: 0.022582, mean_hd95: 119.431232
+[07:11:25.797] Iteration 5 : Loss : 5.954609, Loss_CE: 0.754327, Loss_Dice: 0.707959, UnCLoss: 5.915032, FeCLoss: 3.069598, mean_dice: 0.118166, mean_hd95: 108.218918
+[07:11:28.551] Iteration 6 : Loss : 6.841020, Loss_CE: 0.813789, Loss_Dice: 0.849303, UnCLoss: 5.843612, FeCLoss: 4.512226, mean_dice: 0.176999, mean_hd95: 64.236129
+[07:11:33.188] Iteration 7 : Loss : 6.544704, Loss_CE: 0.812438, Loss_Dice: 0.847756, UnCLoss: 5.709051, FeCLoss: 4.059953, mean_dice: 0.219357, mean_hd95: 85.069573
+[07:11:35.535] Iteration 8 : Loss : 5.719918, Loss_CE: 0.801194, Loss_Dice: 0.867306, UnCLoss: 5.702229, FeCLoss: 2.400592, mean_dice: 0.101082, mean_hd95: 88.870060
+[07:11:37.914] Iteration 9 : Loss : 6.041246, Loss_CE: 0.752993, Loss_Dice: 0.852862, UnCLoss: 5.584171, FeCLoss: 3.286598, mean_dice: 0.139501, mean_hd95: 76.547134
+[07:11:39.945] Iteration 10 : Loss : 5.487596, Loss_CE: 0.744347, Loss_Dice: 0.726692, UnCLoss: 5.408056, FeCLoss: 2.625043, mean_dice: 0.158047, mean_hd95: 84.019746
+[07:11:42.250] Iteration 11 : Loss : 5.486865, Loss_CE: 0.697249, Loss_Dice: 0.689101, UnCLoss: 5.313660, FeCLoss: 2.887356, mean_dice: 0.165704, mean_hd95: 79.638219
+[07:11:44.739] Iteration 12 : Loss : 5.443454, Loss_CE: 0.635388, Loss_Dice: 0.714230, UnCLoss: 5.184626, FeCLoss: 3.003033, mean_dice: 0.186665, mean_hd95: 61.276755
+[07:11:49.604] Iteration 13 : Loss : 5.805263, Loss_CE: 0.655764, Loss_Dice: 0.882314, UnCLoss: 5.143642, FeCLoss: 3.390716, mean_dice: 0.238628, mean_hd95: 68.249003
+[07:11:51.397] Iteration 14 : Loss : 5.704140, Loss_CE: 0.715757, Loss_Dice: 0.884640, UnCLoss: 4.938555, FeCLoss: 3.268917, mean_dice: 0.261170, mean_hd95: 85.984091
+[07:11:53.143] Iteration 15 : Loss : 5.241147, Loss_CE: 0.700050, Loss_Dice: 0.894449, UnCLoss: 4.865508, FeCLoss: 2.427773, mean_dice: 0.143671, mean_hd95: 103.561054

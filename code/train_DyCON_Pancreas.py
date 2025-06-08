@@ -17,6 +17,7 @@ from torchvision import transforms as T
 
 from networks.net_factory_3d import net_factory_3d
 from utils import ramps, metrics, losses, dycon_losses, test_3d_patch, monitor
+from utils.topo_losses import getTopoLoss
 from dataloaders.pancreas import Pancreas, RandomCrop, RandomRotFlip, ToTensor, TwoStreamBatchSampler 
 
 # Argument parsing
@@ -57,6 +58,13 @@ parser.add_argument('--u_weight', type=float, default=0.5, help='Weight for unsu
 parser.add_argument('--use_focal', type=int, default=1, help='Whether to use focal weighting (1 for True, 0 for False)')
 parser.add_argument('--use_teacher_loss', type=int, default=1, help='Use teacher-based auxiliary loss (1 for True, 0 for False)')
 
+# === Topological Loss Parameters === #
+parser.add_argument('--use_topo_loss', type=int, default=0, help='Use topological loss (1 for True, 0 for False)')
+parser.add_argument('--topo_weight', type=float, default=0.1, help='Weight for topological loss')
+parser.add_argument('--topo_size', type=int, default=32, help='Patch size for topological analysis')
+parser.add_argument('--pd_threshold', type=float, default=0.3, help='Persistence diagram threshold for signal/noise separation')
+parser.add_argument('--topo_rampup', type=float, default=500.0, help='Ramp-up duration for topological loss weight')
+
 args = parser.parse_args()
 
 if args.s_beta is not None:
@@ -67,10 +75,11 @@ else:
 focal_str = "Focal" if bool(args.use_focal) else "NoFocal"
 gamma_str = f"_gamma{args.gamma}" if bool(args.use_focal) else ""
 teacher_str = "Teacher" if bool(args.use_teacher_loss) else "NoTeacher"
+topo_str = f"_Topo{args.topo_weight}" if bool(args.use_topo_loss) else ""
 
 snapshot_path = (
     f"../models/{args.exp}/{args.model.upper()}_{args.labelnum}labels_"
-    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}_temp{args.temp}"
+    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}{topo_str}_temp{args.temp}"
     f"{beta_str}_max_iterations{args.max_iterations}"
 )
 
@@ -98,6 +107,12 @@ patch_size = args.patch_size = (112, 112, 96)
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
+
+def get_current_topo_weight(epoch):
+    # Topological loss ramp-up similar to consistency ramp-up
+    if not bool(args.use_topo_loss):
+        return 0.0
+    return args.topo_weight * ramps.sigmoid_rampup(epoch, args.topo_rampup)
 
 def update_ema_variables(model, ema_model, alpha, global_step):
     # Use the true average until the exponential average is more correct
@@ -250,8 +265,43 @@ if __name__ == "__main__":
             u_loss = uncl_criterion(stud_logits, ema_logits, beta)
             consistency_loss = consistency_criterion(stud_probs[labeled_bs:], ema_probs[labeled_bs:]).mean()
             
+            # --- Topological loss: đảm bảo nhất quán về cấu trúc topo giữa student và teacher ---
+            topo_weight = get_current_topo_weight(iter_num//150)
+            topo_loss = torch.tensor(0.0).cuda()
+            
+            if bool(args.use_topo_loss) and topo_weight > 0:
+                try:
+                    # Tính topological loss cho từng sample trong batch (chỉ labeled samples)
+                    batch_topo_loss = 0.0
+                    num_valid_samples = 0
+                    
+                    for b_idx in range(labeled_bs):
+                        # Lấy probability map của student và teacher cho sample này
+                        # Chỉ lấy class 1 (foreground) để phân tích topo
+                        stu_prob_2d = stud_probs[b_idx, 1, :, :, stud_probs.shape[-1]//2]  # slice giữa
+                        tea_prob_2d = ema_probs[b_idx, 1, :, :, ema_probs.shape[-1]//2]   # slice giữa
+                        
+                        # Chỉ tính topo loss nếu có đủ variation trong probability map
+                        if stu_prob_2d.max() - stu_prob_2d.min() > 0.1 and tea_prob_2d.max() - tea_prob_2d.min() > 0.1:
+                            sample_topo_loss = getTopoLoss(
+                                stu_tensor=stu_prob_2d,
+                                tea_tensor=tea_prob_2d,
+                                topo_size=args.topo_size,
+                                pd_threshold=args.pd_threshold
+                            )
+                            if not torch.isnan(sample_topo_loss) and not torch.isinf(sample_topo_loss):
+                                batch_topo_loss += sample_topo_loss
+                                num_valid_samples += 1
+                    
+                    if num_valid_samples > 0:
+                        topo_loss = batch_topo_loss / num_valid_samples
+                        
+                except Exception as e:
+                    logging.warning(f"Error computing topological loss at iteration {iter_num}: {str(e)}")
+                    topo_loss = torch.tensor(0.0).cuda()
+            
             # Gather losses
-            loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss)
+            loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
 
             # Check for NaN or Inf values
             if torch.isnan(loss) or torch.isinf(loss):
@@ -276,6 +326,8 @@ if __name__ == "__main__":
             writer.add_scalar('info/loss_dice', loss_seg_dice, iter_num) 
             writer.add_scalar('info/consistency_loss', consistency_loss, iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
+            writer.add_scalar('info/topo_loss', topo_loss, iter_num)
+            writer.add_scalar('info/topo_weight', topo_weight, iter_num)
             
             del noise, stud_embedding, ema_logits, ema_features, ema_probs, mask_con
 
@@ -290,9 +342,10 @@ if __name__ == "__main__":
             writer.add_scalar('train/Dice', dice_score.mean().item(), iter_num)
             writer.add_scalar('train/HD95', np.mean(hausdorff_score).item(), iter_num)
             
+            topo_loss_str = f", TopoLoss: {topo_loss.item():.3f}" if bool(args.use_topo_loss) and topo_weight > 0 else ""
             logging.info(
-                'Iteration %d : Loss : %03f, Loss_CE: %03f, Loss_Dice: %03f, UnCLoss: %03f, FeCLoss: %03f, mean_dice: %03f, mean_hd95: %03f' %
-                (iter_num, loss.item(), loss_seg.item(), loss_seg_dice.item(), u_loss.item(), f_loss.item(), dice_score.mean().item(), np.mean(hausdorff_score).item()))
+                'Iteration %d : Loss : %03f, Loss_CE: %03f, Loss_Dice: %03f, UnCLoss: %03f, FeCLoss: %03f%s, mean_dice: %03f, mean_hd95: %03f' %
+                (iter_num, loss.item(), loss_seg.item(), loss_seg_dice.item(), u_loss.item(), f_loss.item(), topo_loss_str, dice_score.mean().item(), np.mean(hausdorff_score).item()))
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()

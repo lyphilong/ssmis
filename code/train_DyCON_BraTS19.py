@@ -7,6 +7,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+import wandb
 
 import torch
 import torch.optim as optim
@@ -17,7 +18,18 @@ from torchvision import transforms as T
 
 from networks.net_factory_3d import net_factory_3d
 from utils import ramps, metrics, losses, dycon_losses, test_3d_patch, monitor
+from utils.topo_losses import getTopoLoss
 from dataloaders.brats19 import BraTS2019, SagittalToAxial, RandomCrop, RandomRotFlip, ToTensor, TwoStreamBatchSampler 
+
+import matplotlib.pyplot as plt
+
+# ====== WANDB LOGIN HƯỚNG DẪN ======
+# Nếu bạn chưa login wandb, hãy chạy lệnh: wandb login
+# Hoặc để tự động login bằng dummy key (bạn cần sửa lại sau bằng key thật của bạn)
+if not os.path.exists(os.path.expanduser("~/.netrc")) and not os.environ.get("WANDB_API_KEY"):
+    # Dummy key, hãy thay bằng key thật của bạn sau!
+    os.environ["WANDB_API_KEY"] = "340859a29629cb9f0783ca4213409e89c5eed05f"
+    # Hoặc bạn có thể dùng: wandb.login(key="your_dummy_wandb_api_key_here")
 
 # ================= DyCON Training Script for BraTS2019 =====================
 # Các comment dưới đây giải thích mối liên hệ giữa code và kiến trúc DyCON trong paper (hình Figure 2)
@@ -45,7 +57,7 @@ parser.add_argument('--root_dir', type=str, default="../data/BraTS2019", help='P
 parser.add_argument('--patch_size', type=str, default=[112, 112, 80], help='Input image patch size')
 
 parser.add_argument('--exp', type=str, default='BraTS2019', help='Experiment name')
-parser.add_argument('--gpu_id', type=str, default=0, help='GPU to use')
+parser.add_argument('--gpu_id', type=str, default=1, help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='Random seed for reproducibility')
 parser.add_argument('--deterministic', type=int, default=1, help='Use deterministic training (0 or 1)')
 
@@ -79,6 +91,13 @@ parser.add_argument('--u_weight', type=float, default=0.5, help='Weight for unsu
 parser.add_argument('--use_focal', type=int, default=1, help='Whether to use focal weighting (1 for True, 0 for False)')
 parser.add_argument('--use_teacher_loss', type=int, default=1, help='Use teacher-based auxiliary loss (1 for True, 0 for False)')
 
+# === Topological Loss Parameters === #
+parser.add_argument('--use_topo_loss', type=int, default=0, help='Use topological loss (1 for True, 0 for False)')
+parser.add_argument('--topo_weight', type=float, default=0.01, help='Weight for topological loss')
+parser.add_argument('--topo_size', type=int, default=32, help='Patch size for topological analysis')
+parser.add_argument('--pd_threshold', type=float, default=0.3, help='Persistence diagram threshold for signal/noise separation')
+parser.add_argument('--topo_rampup', type=float, default=500.0, help='Ramp-up duration for topological loss weight')
+
 args = parser.parse_args()
 
 if args.s_beta is not None:
@@ -89,10 +108,11 @@ else:
 focal_str = "Focal" if bool(args.use_focal) else "NoFocal"
 gamma_str = f"_gamma{args.gamma}" if bool(args.use_focal) else ""
 teacher_str = "Teacher" if bool(args.use_teacher_loss) else "NoTeacher"
+topo_str = f"_Topo{args.topo_weight}" if bool(args.use_topo_loss) else ""
 
 snapshot_path = (
     f"../models/{args.exp}/{args.model.upper()}_{args.labelnum}labels_"
-    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}_temp{args.temp}"
+    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}{topo_str}_temp{args.temp}"
     f"{beta_str}_max_iterations{args.max_iterations}"
 )
 
@@ -121,6 +141,12 @@ def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
+def get_current_topo_weight(epoch):
+    # Topological loss ramp-up similar to consistency ramp-up
+    if not bool(args.use_topo_loss):
+        return 0.0
+    return args.topo_weight * ramps.sigmoid_rampup(epoch, args.topo_rampup)
+
 def update_ema_variables(model, ema_model, alpha, global_step):
     # Use the true average until the exponential average is more correct
     alpha = min(1 - 1 / (global_step + 1), alpha)
@@ -138,6 +164,24 @@ def plot_samples(image, mask, epoch):
     plt.savefig(f'../misc/train_preds/LA_sample_slice_{str(epoch)}.png')
     plt.close()
 
+def plot_and_save_metrics(metrics_dict, save_dir):
+    """
+    Vẽ biểu đồ các độ đo (loss, dice, hd95, accuracy, ...) và lưu lại.
+    metrics_dict: dict, key là tên metric, value là list các giá trị theo iter_num
+    save_dir: thư mục để lưu các biểu đồ
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    for metric_name, values in metrics_dict.items():
+        plt.figure()
+        plt.plot(values, label=metric_name)
+        plt.xlabel('Iteration')
+        plt.ylabel(metric_name)
+        plt.title(f'{metric_name} over Iterations')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f"{metric_name}.png"))
+        plt.close()
 
 if __name__ == "__main__":
     # === 1. Khởi tạo logger, lưu code, chuẩn bị môi trường ===
@@ -153,6 +197,13 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
+
+    # === Khởi tạo wandb ===
+    wandb.init(
+        project="DyCON-BraTS19",
+        name=args.exp,
+        config=vars(args)
+    )
 
     # === 2. Tạo Student/Teacher Model (Khối Mean-Teacher, hình giữa) ===
     def create_model(ema=False):
@@ -212,8 +263,26 @@ if __name__ == "__main__":
 
     # Loss đặc trưng của DyCON: UnCLoss, FeCLoss (khối xanh lá trong hình)
     uncl_criterion = dycon_losses.UnCLoss()
-    fecl_criterion = dycon_losses.FeCLoss(device=f"cuda:0", temperature=args.temp, gamma=args.gamma, use_focal=bool(args.use_focal), rampup_epochs=1500)
+    fecl_criterion = dycon_losses.FeCLoss(device=torch.device("cuda"), temperature=args.temp, gamma=args.gamma, use_focal=bool(args.use_focal), rampup_epochs=1500)
     
+    # === Khởi tạo dict lưu các metric để vẽ biểu đồ ===
+    metrics_history = {
+        'loss': [],
+        'f_loss': [],
+        'u_loss': [],
+        'loss_ce': [],
+        'loss_dice': [],
+        'consistency_loss': [],
+        'consistency_weight': [],
+        'topo_loss': [],
+        'topo_weight': [],
+        'train_Dice': [],
+        'train_HD95': [],
+        'val_Dice': [],
+        'val_Best_dice': [],
+        'train_Accuracy': [],
+    }
+
     for epoch_num in iterator:
         # === 5. Adaptive beta cho UnCLoss (theo epoch) ===
         if args.s_beta is not None:
@@ -259,10 +328,18 @@ if __name__ == "__main__":
             loss_seg_dice = losses.dice_loss(stud_probs[:labeled_bs, 1, :, :, :], label_batch[:labeled_bs] == 1) # Dice cho labeled
             
             # --- Chuẩn bị embedding cho contrastive loss (FeCL, UnCL) ---
-            B, C, _, _, _ = stud_features.shape
-            stud_embedding = stud_features.view(B, C, -1)
-            stud_embedding = torch.transpose(stud_embedding, 1, 2) 
-            stud_embedding = F.normalize(stud_embedding, dim=-1)  
+            # stud_features có shape (B, C, D, H, W) với:
+            #   B: batch size
+            #   C: số lượng kênh đặc trưng (feature channels)
+            #   D, H, W: kích thước không gian (depth, height, width)
+            # Để tính contrastive loss, ta cần biểu diễn mỗi patch (vị trí không gian) thành 1 vector embedding.
+            # Bước 1: .view(B, C, -1) => chuyển (B, C, D, H, W) thành (B, C, N), với N = D*H*W (tổng số patch)
+            # Bước 2: .transpose(1, 2) => chuyển thành (B, N, C), mỗi patch là 1 vector C chiều
+            # Bước 3: F.normalize(..., dim=-1) => chuẩn hóa vector embedding theo từng patch (chuẩn hóa theo chiều C)
+            B, C, _, _, _ = stud_features.shape  # B: batch size, C: số kênh đặc trưng
+            stud_embedding = stud_features.view(B, C, -1)         # (B, C, N)
+            stud_embedding = torch.transpose(stud_embedding, 1, 2) # (B, N, C) 8, 1728, 256
+            stud_embedding = F.normalize(stud_embedding, dim=-1)   # (B, N, C), mỗi patch là 1 vector đã chuẩn hóa 8, 1728, 256
 
             ema_embedding = ema_features.view(B, C, -1)
             ema_embedding = torch.transpose(ema_embedding, 1, 2)
@@ -301,8 +378,54 @@ if __name__ == "__main__":
             # --- Consistency loss giữa student/teacher (khối xanh dương nhạt) ---
             consistency_loss = consistency_criterion(stud_probs[labeled_bs:], ema_probs[labeled_bs:]).mean()
             
+            # --- Topological loss: đảm bảo nhất quán về cấu trúc topo giữa student và teacher ---
+            topo_weight = get_current_topo_weight(iter_num//150)
+            topo_loss = torch.tensor(0.0).cuda()
+            
+            if bool(args.use_topo_loss) and topo_weight > 0:
+                try:
+                    # Tính topological loss cho từng sample trong batch (chỉ labeled samples)
+                    batch_topo_loss = 0.0
+                    num_valid_samples = 0
+                    
+                    for b_idx in range(labeled_bs):
+                        # Lấy probability map của student và teacher cho sample này
+                        # Chỉ lấy class 1 (foreground) để phân tích topo
+                        # Vì đây là bài toán segmentation với 2 class: 0 (background) và 1 (foreground)
+                        # Foreground: là vùng quan tâm (ví dụ: khối u, cơ quan, tổn thương, ...), thường được gán label = 1.
+                        # Background: là phần còn lại (không quan tâm), thường label = 0.
+                        # Foreground mới là vùng chứa thông tin cấu trúc quan trọng (ví dụ: số lượng khối u, hình dạng, lỗ hổng, ...).
+                        # Background thường là không gian trống, không có ý nghĩa về mặt topo (thường là 1 khối lớn, không có cấu trúc phức tạp).
+                        # Nếu tính topo cho cả background, sẽ không phản ánh đúng chất lượng phân đoạn của vùng quan tâm. 
+                        # Persistence diagram hoặc Betti number của foreground sẽ cho biết số thành phần liên thông, số lỗ, ... của vùng quan tâm.
+                        # => Chúng ta chỉ lấy class foreground (label = 1) để phân tích topo vì đây là vùng quan tâm chính trong bài toán phân đoạn y tế. Các đặc trưng topo như số thành phần liên thông, số lỗ, ... của foreground phản ánh trực tiếp chất lượng phân đoạn. 
+                        # => Ngược lại, background thường không mang ý nghĩa cấu trúc quan trọng, nên không cần tối ưu topo cho vùng này.
+                        stu_prob_2d = stud_probs[b_idx, 1, :, :, stud_probs.shape[-1]//2]  # slice giữa
+                        tea_prob_2d = ema_probs[b_idx, 1, :, :, ema_probs.shape[-1]//2]   # slice giữa
+                        
+                        # Chỉ tính topo loss nếu có đủ variation trong probability map
+                        # => Nếu không có variation, sẽ không có cấu trúc topo để tối ưu, do probability map không có cấu trúc phức tạp (ví dụ: không có lỗ hổng, không có cấu trúc phức tạp, ...).
+                        # Tránh tính topo loss cho các trường hợp vô nghĩa (toàn ảnh đen/trắng, hoặc dự đoán quá chắc chắn).
+                        if stu_prob_2d.max() - stu_prob_2d.min() > 0.1 and tea_prob_2d.max() - tea_prob_2d.min() > 0.1:
+                            sample_topo_loss = getTopoLoss(
+                                stu_tensor=stu_prob_2d,
+                                tea_tensor=tea_prob_2d,
+                                topo_size=args.topo_size,
+                                pd_threshold=args.pd_threshold
+                            )
+                            if not torch.isnan(sample_topo_loss) and not torch.isinf(sample_topo_loss):
+                                batch_topo_loss += sample_topo_loss
+                                num_valid_samples += 1
+                    
+                    if num_valid_samples > 0:
+                        topo_loss = batch_topo_loss / num_valid_samples
+                        
+                except Exception as e:
+                    logging.warning(f"Error computing topological loss at iteration {iter_num}: {str(e)}")
+                    topo_loss = torch.tensor(0.0).cuda()
+            
             # Gather losses
-            loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss)
+            loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
 
             # === 9. Backward, update model ===
             if torch.isnan(loss) or torch.isinf(loss):
@@ -327,23 +450,61 @@ if __name__ == "__main__":
             writer.add_scalar('info/loss_dice', loss_seg_dice, iter_num) 
             writer.add_scalar('info/consistency_loss', consistency_loss, iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
+            writer.add_scalar('info/topo_loss', topo_loss, iter_num)
+            writer.add_scalar('info/topo_weight', topo_weight, iter_num)
             
+            # === Lưu các giá trị vào metrics_history để vẽ biểu đồ sau này ===
+            metrics_history['loss'].append(loss.item())
+            metrics_history['f_loss'].append(f_loss.item())
+            metrics_history['u_loss'].append(u_loss.item())
+            metrics_history['loss_ce'].append(loss_seg.item())
+            metrics_history['loss_dice'].append(loss_seg_dice.item())
+            metrics_history['consistency_loss'].append(consistency_loss.item())
+            metrics_history['consistency_weight'].append(consistency_weight)
+            metrics_history['topo_loss'].append(topo_loss.item())
+            metrics_history['topo_weight'].append(topo_weight)
+
             del noise, stud_embedding, ema_logits, ema_features, ema_probs, mask_con
 
-            # === 11. Đánh giá nhanh Dice, HD95 trên batch hiện tại ===
+            # === 11. Đánh giá nhanh Dice, HD95, Accuracy trên batch hiện tại ===
             with torch.no_grad():
                 outputs_bin = (stud_probs[:, 1, :, :, :] > 0.5).float()
                 dice_score = metrics.compute_dice(outputs_bin, label_batch)
                 H, W, D = stud_logits.shape[-3:]
                 max_dist = np.linalg.norm([H, W, D])
                 hausdorff_score = metrics.compute_hd95(outputs_bin, label_batch, max_dist)
+                # Accuracy: số pixel đúng / tổng số pixel
+                acc = (outputs_bin == (label_batch == 1)).float().mean().item()
 
             writer.add_scalar('train/Dice', dice_score.mean().item(), iter_num)
             writer.add_scalar('train/HD95', np.mean(hausdorff_score).item(), iter_num)
+            writer.add_scalar('train/Accuracy', acc, iter_num)
+
+            metrics_history['train_Dice'].append(dice_score.mean().item())
+            metrics_history['train_HD95'].append(np.mean(hausdorff_score).item())
+            metrics_history['train_Accuracy'].append(acc)
             
+            topo_loss_str = f", TopoLoss: {topo_loss.item():.3f}" if bool(args.use_topo_loss) and topo_weight > 0 else ""
             logging.info(
-                'Iteration %d : Loss : %03f, Loss_CE: %03f, Loss_Dice: %03f, UnCLoss: %03f, FeCLoss: %03f, mean_dice: %03f, mean_hd95: %03f' %
-                (iter_num, loss.item(), loss_seg.item(), loss_seg_dice.item(), u_loss.item(), f_loss.item(), dice_score.mean().item(), np.mean(hausdorff_score).item()))
+                'Iteration %d : Loss : %03f, Loss_CE: %03f, Loss_Dice: %03f, UnCLoss: %03f, FeCLoss: %03f%s, mean_dice: %03f, mean_hd95: %03f, acc: %03f' %
+                (iter_num, loss.item(), loss_seg.item(), loss_seg_dice.item(), u_loss.item(), f_loss.item(), topo_loss_str, dice_score.mean().item(), np.mean(hausdorff_score).item(), acc))
+
+            # === Log metrics lên wandb ===
+            wandb.log({
+                'loss': loss.item(),
+                'f_loss': f_loss.item(),
+                'u_loss': u_loss.item(),
+                'loss_ce': loss_seg.item(),
+                'loss_dice': loss_seg_dice.item(),
+                'consistency_loss': consistency_loss.item(),
+                'consistency_weight': consistency_weight,
+                'topo_loss': topo_loss.item(),
+                'topo_weight': topo_weight,
+                'train_Dice': dice_score.mean().item(),
+                'train_HD95': np.mean(hausdorff_score).item(),
+                'train_Accuracy': acc,
+                'iter': iter_num
+            })
 
             # === 12. Đánh giá toàn bộ validation set định kỳ, lưu model tốt nhất ===
             if iter_num > 0 and iter_num % 200 == 0:
@@ -359,6 +520,8 @@ if __name__ == "__main__":
 
                 writer.add_scalar('info/Dice', avg_metric, iter_num)
                 writer.add_scalar('info/Best_dice', best_performance, iter_num)
+                metrics_history['val_Dice'].append(avg_metric)
+                metrics_history['val_Best_dice'].append(best_performance)
                 logging.info('Iteration %d : Dice: %03f Best_dice: %03f' % (iter_num, avg_metric, best_performance))
                 model.train()
 
@@ -374,7 +537,12 @@ if __name__ == "__main__":
         if iter_num >= max_iterations:
             iterator.close()
             break
-            
+
     writer.close()
     print("Training Finished!")
 
+    # === Vẽ và lưu biểu đồ các metric sau khi train xong ===
+    plot_and_save_metrics(metrics_history, os.path.join(snapshot_path, "metrics_plots"))
+
+    # === Kết thúc wandb run ===
+    wandb.finish()

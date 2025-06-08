@@ -9,4 +9,9 @@ python train_DyCON_Pancreas.py \
 --temp 0.6 \
 --batch_size 8 \
 --labelnum 12 \
---gpu_id 3
+--gpu_id 3 \
+--use_topo_loss 1 \
+--topo_weight 0.1 \
+--topo_size 32 \
+--pd_threshold 0.3 \
+--topo_rampup 500

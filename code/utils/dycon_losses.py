@@ -157,22 +157,22 @@ class FeCLoss(nn.Module):
         #   - mem_mask: (B, N, N), 1 nếu cùng class (positive), 0 nếu khác class (negative)
         #   - mem_mask_neg: (B, N, N), 1 nếu khác class
         #   - mem_mask <-> 1_{y_i = y_k} trong paper
-        print("[DEBUG] mask shape:", mask.shape)
-        print("[DEBUG] mask (first 3x3 block, batch 0):\n", mask[0, :3, :3].detach().cpu().numpy())
+        # print("[DEBUG] mask shape:", mask.shape)
+        # print("[DEBUG] mask (first 3x3 block, batch 0):\n", mask[0, :3, :3].detach().cpu().numpy())
         mem_mask = torch.eq(mask, mask.transpose(1, 2)).float()  # Positive mask
-        print("[DEBUG] mem_mask shape:", mem_mask.shape)
-        print("[DEBUG] mem_mask (first 3x3 block, batch 0):\n", mem_mask[0, :3, :3].detach().cpu().numpy())
+        # print("[DEBUG] mem_mask shape:", mem_mask.shape)
+        # print("[DEBUG] mem_mask (first 3x3 block, batch 0):\n", mem_mask[0, :3, :3].detach().cpu().numpy())
         mem_mask_neg = 1 - mem_mask  # Negative mask
-        print("[DEBUG] mem_mask_neg (first 3x3 block, batch 0):\n", mem_mask_neg[0, :3, :3].detach().cpu().numpy())
+        # print("[DEBUG] mem_mask_neg (first 3x3 block, batch 0):\n", mem_mask_neg[0, :3, :3].detach().cpu().numpy())
         # 2. Tính similarity giữa các patch (student)
         #   - feat_logits[b, i, j] = S_ij trong paper (Eq.3,4)
         #   - S_ik: positive pair (mask[b, i, k] == 1)
         #   - S_iq: negative pair (mask_neg[b, i, q] == 1)
         #   - S_il: similarity với mọi patch l (dùng cho normalization)
         feat_logits = torch.matmul(feat, feat.transpose(1, 2)) / self.temperature  # S_ij
-        if B > 0:
-            print("[DEBUG] feat_logits (S_ij) shape:", feat_logits.shape)
-            print("[DEBUG] S_ij (first 3x3 block, batch 0):\n", feat_logits[0, :3, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] feat_logits (S_ij) shape:", feat_logits.shape)
+        #     print("[DEBUG] S_ij (first 3x3 block, batch 0):\n", feat_logits[0, :3, :3].detach().cpu().numpy())
         identity = torch.eye(N, device=self.device)
         neg_identity = 1 - identity  # Loại self-similarity
         feat_logits = feat_logits * neg_identity # Loại self-similarity, loại bỏ đường chéo
@@ -185,28 +185,28 @@ class FeCLoss(nn.Module):
         #   - exp_logits[b, i, j] = exp(S_ij)
         #   - exp(S_ik): positive, exp(S_iq): negative, exp(S_il): mọi patch
         exp_logits = torch.exp(feat_logits)  # (B, N, N) exp(S_ij)
-        if B > 0:
-            print("[DEBUG] exp_logits (exp(S_ij)) shape:", exp_logits.shape)
-            print("[DEBUG] exp(S_ij) (first 3x3 block, batch 0):\n", exp_logits[0, :3, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] exp_logits (exp(S_ij)) shape:", exp_logits.shape)
+        #     print("[DEBUG] exp(S_ij) (first 3x3 block, batch 0):\n", exp_logits[0, :3, :3].detach().cpu().numpy())
         neg_sum = torch.sum(exp_logits * mem_mask_neg, dim=-1)  # (B, N) sum(exp(S_iq))
-        if B > 0:
-            print("[DEBUG] neg_sum (sum_q exp(S_iq)) shape:", neg_sum.shape)
-            print("[DEBUG] neg_sum (first 3, batch 0):", neg_sum[0, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] neg_sum (sum_q exp(S_iq)) shape:", neg_sum.shape)
+        #     print("[DEBUG] neg_sum (first 3, batch 0):", neg_sum[0, :3].detach().cpu().numpy())
 
         # 5. Tính denominator D(i) 
         #   - D(i) = exp(S_ik) + sum_{q in N(i)} F^-_q * [ exp(S_iq) + 1/K sum_{l=1}^K exp(S_il) ]
         # Hiện tại chỉ có exp(S_ik) và sum_{q in N(i)} exp(S_iq) không có F^-_q là focal weight và 1/K sum_{l=1}^K exp(S_il) là trung bình similarity của mọi patch
         denominator = exp_logits + neg_sum.unsqueeze(dim=-1)  # D(i) = exp(S_ik) + sum_{q in N(i)} F^-_q * [ exp(S_iq) + 1/K sum_{l=1}^K exp(S_il) ]
-        if B > 0:
-            print("[DEBUG] denominator D(i) shape:", denominator.shape)
-            print("[DEBUG] D(i) (first 3x3 block, batch 0):\n", denominator[0, :3, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] denominator D(i) shape:", denominator.shape)
+        #     print("[DEBUG] D(i) (first 3x3 block, batch 0):\n", denominator[0, :3, :3].detach().cpu().numpy())
         
         # 6. Tính softmax-like probability
         #   - division[b, i, j] = exp(S_ij) / D(i)
         division = exp_logits / (denominator + 1e-18)  # Softmax-like probability
-        if B > 0:
-            print("[DEBUG] division (exp(S_ij)/D(i)) shape:", division.shape)
-            print("[DEBUG] division (first 3x3 block, batch 0):\n", division[0, :3, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] division (exp(S_ij)/D(i)) shape:", division.shape)
+        #     print("[DEBUG] division (first 3x3 block, batch 0):\n", division[0, :3, :3].detach().cpu().numpy())
 
         # 7. Tính loss matrix
         #   - loss_matrix[b, i, j] = -log(division[b, i, j])
@@ -218,13 +218,13 @@ class FeCLoss(nn.Module):
         # - mem_mask[b, i, j] = 1 nếu patch i và j cùng class (positive pair). -> chỉ tính loss tại các positive pair (exp(S_{ik}))
         # - neg_identity loại trừ self-similarity
         loss_matrix = loss_matrix * mem_mask * neg_identity # Loại bỏ loss tại patch i với chính nó (self-similarity)
-        if B > 0:
-            print("[DEBUG] loss_matrix shape:", loss_matrix.shape)
-            print("[DEBUG] loss_matrix (first 3x3 block, batch 0):\n", loss_matrix[0, :3, :3].detach().cpu().numpy())
+        # if B > 0:
+        #     print("[DEBUG] loss_matrix shape:", loss_matrix.shape)
+        #     print("[DEBUG] loss_matrix (first 3x3 block, batch 0):\n", loss_matrix[0, :3, :3].detach().cpu().numpy())
 
         loss_student = torch.sum(loss_matrix, dim=-1) / (torch.sum(mem_mask, dim=-1) - 1 + 1e-18)
         loss_student = loss_student.mean()
-        print("[DEBUG] loss_student:", loss_student.item())
+        # print("[DEBUG] loss_student:", loss_student.item())
 
         if self.use_focal:
             similarity = division  # S_ik trong paper
@@ -240,13 +240,13 @@ class FeCLoss(nn.Module):
             #   - F^-_q = (S_iq)^gamma (Eq.4)
             hard_neg_mask = mem_mask_neg.bool() & (similarity > neg_thresh)
             focal_weights[hard_neg_mask] = similarity[hard_neg_mask].pow(self.gamma)
-            if B > 0:
-                print("[DEBUG] focal_weights (first 3x3 block, batch 0):\n", focal_weights[0, :3, :3].detach().cpu().numpy())
+            # if B > 0:
+            #     print("[DEBUG] focal_weights (first 3x3 block, batch 0):\n", focal_weights[0, :3, :3].detach().cpu().numpy())
 
             # Tính loss tại mỗi patch i với tất cả patch j
             loss_student = torch.sum(loss_matrix * focal_weights, dim=-1) / (torch.sum(mem_mask, dim=-1) - 1 + 1e-18)
             loss_student = loss_student.mean()
-            print("[DEBUG] loss_student (with focal):", loss_student.item())
+            # print("[DEBUG] loss_student (with focal):", loss_student.item())
 
         # 8. Gambling Softmax entropy mask cho positive (Eq.5):
         #   - Nếu có gambling_uncertainty, dùng nó để điều chỉnh trọng số positive
@@ -274,13 +274,13 @@ class FeCLoss(nn.Module):
                 loss_cross_term = -torch.log(1 - cross_sim + 1e-18)
                 loss_cross_term = loss_cross_term * cross_hard_neg_mask.float()
                 loss_cross = torch.sum(loss_cross_term) / (torch.sum(cross_hard_neg_mask.float()) + 1e-18)
-                print("[DEBUG] loss_cross (auxiliary):", loss_cross)
+                # print("[DEBUG] loss_cross (auxiliary):", loss_cross)
             else:
                 loss_cross = 0.0
 
         # 10. Tổng hợp loss: student contrastive + auxiliary teacher loss
         total_loss = loss_student + self.lambda_cross * loss_cross
-        print("[DEBUG] total_loss:", total_loss.item())
+        # print("[DEBUG] total_loss:", total_loss.item())
         return total_loss
 
 if __name__ == "__main__":

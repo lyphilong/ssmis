@@ -19,6 +19,25 @@ from networks.net_factory_3d import net_factory_3d
 from utils import ramps, metrics, losses, dycon_losses, test_3d_patch, monitor
 from dataloaders.brats19 import BraTS2019, SagittalToAxial, RandomCrop, RandomRotFlip, ToTensor, TwoStreamBatchSampler 
 
+# ================= DyCON Training Script for BraTS2019 =====================
+# Các comment dưới đây giải thích mối liên hệ giữa code và kiến trúc DyCON trong paper (hình Figure 2)
+# --------------------------------------------------------------------------
+# 1. Preprocessing Input Volumes (Khối màu xanh nhạt bên trái hình):
+#    - Đọc dữ liệu, áp dụng augmentation (RandomCrop, RandomRotFlip, ...)
+#    - Chia batch thành labeled và unlabeled (TwoStreamBatchSampler)
+# 2. Mean-Teacher với backbone 3D UNet (Khối giữa hình):
+#    - Student Model: f^s_θ (model)
+#    - Teacher Model: f^t_θ (ema_model, cập nhật bằng EMA)
+#    - Cùng forward input qua student/teacher, lấy logits, features
+# 3. Loss components (Khối phải hình):
+#    - Supervised loss: L_Dice + L_CE (cho batch labeled)
+#    - Unsupervised loss: L_UnCL, L_FeCL (cho batch unlabeled)
+#    - Consistency loss giữa student/teacher
+#    - Tổng hợp loss để backward
+# 4. EMA update: Cập nhật teacher model từ student model
+# 5. Logging, evaluation, save model
+# --------------------------------------------------------------------------
+
 # Argument parsing
 parser = argparse.ArgumentParser(description="Training DyCON on BraTS2019 Dataset")
 
@@ -118,7 +137,8 @@ def plot_samples(image, mask, epoch):
 
 
 if __name__ == "__main__":
-    # make logger file
+    # === 1. Khởi tạo logger, lưu code, chuẩn bị môi trường ===
+    # (Không liên quan trực tiếp đến kiến trúc, chỉ để log và lưu lại code chạy)
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + '/code'):
@@ -131,30 +151,30 @@ if __name__ == "__main__":
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
 
+    # === 2. Tạo Student/Teacher Model (Khối Mean-Teacher, hình giữa) ===
     def create_model(ema=False):
         net = net_factory_3d(net_type=args.model, in_chns=args.in_ch, class_num=num_classes, scaler=args.feature_scaler)
-        model = net.cuda() # Now 'cuda:0' refers to physical GPU 3
+        model = net.cuda()
         if ema:
             for param in model.parameters():
-                param.detach_()
+                param.detach_() # Teacher model không cập nhật gradient
         return model
 
-    # Model definition
-    model = create_model()
-    ema_model = create_model(ema=True)
+    model = create_model() # Student model: f^s_θ
+    ema_model = create_model(ema=True) # Teacher model: f^t_θ (EMA)
     logging.info("Total params of model: {:.2f}M".format(sum(p.numel() for p in model.parameters())/1e6))
 
-    # Read dataset
+    # === 3. Chuẩn bị dữ liệu & Augmentation (Khối Preprocessing Input Volumes, hình trái) ===
     db_train = BraTS2019(base_dir=args.root_dir, 
                          split='train', 
                          transform=T.Compose([
-                             SagittalToAxial(),
-                             RandomCrop(patch_size),
-                             RandomRotFlip(),
+                             SagittalToAxial(), # Chuyển hướng lát cắt
+                             RandomCrop(patch_size), # Augmentation: crop ngẫu nhiên
+                             RandomRotFlip(), # Augmentation: xoay/nghiêng ngẫu nhiên
                              ToTensor()
                         ]))
     
-            
+    # Chia chỉ số thành labeled và unlabeled (phục vụ semi-supervised)
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
     unlabeled_idxs = list(range(labelnum, db_train.__len__()))
@@ -168,8 +188,10 @@ if __name__ == "__main__":
     model.train()
     ema_model.train()
 
+    # === 4. Khởi tạo optimizer, loss function ===
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
+    # Loss consistency giữa student/teacher (khối consistency trong hình)
     if args.consistency_type == 'mse':
         consistency_criterion = losses.softmax_mse_loss
     elif args.consistency_type == 'kl':
@@ -185,34 +207,39 @@ if __name__ == "__main__":
     best_performance = 0.0
     iterator = tqdm(range(max_epoch), ncols=70)
 
+    # Loss đặc trưng của DyCON: UnCLoss, FeCLoss (khối xanh lá trong hình)
     uncl_criterion = dycon_losses.UnCLoss()
     fecl_criterion = dycon_losses.FeCLoss(device=f"cuda:0", temperature=args.temp, gamma=args.gamma, use_focal=bool(args.use_focal), rampup_epochs=1500)
     
     for epoch_num in iterator:
-
+        # === 5. Adaptive beta cho UnCLoss (theo epoch) ===
         if args.s_beta is not None:
             beta = args.s_beta
         else:
             beta = dycon_losses.adaptive_beta(epoch=epoch_num, total_epochs=max_epoch, max_beta=args.beta_max, min_beta=args.beta_min)
 
         for i_batch, sampled_batch in enumerate(trainloader):
+            # === 6. Lấy batch dữ liệu, augmentation noise cho teacher ===
             volume_batch, label_batch = sampled_batch['image'].cuda(), sampled_batch['label'].cuda()
             
-            noise = torch.clamp(torch.randn_like(volume_batch) * 0.1, -0.2, 0.2)
+            noise = torch.clamp(torch.randn_like(volume_batch) * 0.1, -0.2, 0.2) # Augmentation cho teacher
             ema_inputs = volume_batch + noise
 
-            _, stud_logits, stud_features = model(volume_batch)
+            # === 7. Forward student/teacher model (khối giữa hình) ===
+            _, stud_logits, stud_features = model(volume_batch) # Student: logits, features
             with torch.no_grad():
-                _, ema_logits, ema_features = ema_model(ema_inputs)
+                _, ema_logits, ema_features = ema_model(ema_inputs) # Teacher: logits, features
            
             stud_probs = F.softmax(stud_logits, dim=1)
             ema_probs = F.softmax(ema_logits, dim=1)
             consistency_weight = get_current_consistency_weight(iter_num//150)
             
-            # Calculate the supervised loss
-            loss_seg = F.cross_entropy(stud_logits[:labeled_bs], label_batch[:labeled_bs]) # 0.9020
-            loss_seg_dice = losses.dice_loss(stud_probs[:labeled_bs, 1, :, :, :], label_batch[:labeled_bs] == 1) # 0.9880
+            # === 8. Tính các loss ===
+            # --- Supervised loss (khối đỏ, L_Dice + L_CE) ---
+            loss_seg = F.cross_entropy(stud_logits[:labeled_bs], label_batch[:labeled_bs]) # CrossEntropy cho labeled
+            loss_seg_dice = losses.dice_loss(stud_probs[:labeled_bs, 1, :, :, :], label_batch[:labeled_bs] == 1) # Dice cho labeled
             
+            # --- Chuẩn bị embedding cho contrastive loss (FeCL, UnCL) ---
             B, C, _, _, _ = stud_features.shape
             stud_embedding = stud_features.view(B, C, -1)
             stud_embedding = torch.transpose(stud_embedding, 1, 2) 
@@ -222,54 +249,49 @@ if __name__ == "__main__":
             ema_embedding = torch.transpose(ema_embedding, 1, 2)
             ema_embedding = F.normalize(ema_embedding, dim=-1)
 
-            # Mask contrastive
+            # --- Mask contrastive: tạo mask cho patch embedding (phục vụ FeCL) ---
             mask_con = F.avg_pool3d(label_batch.float(), kernel_size=args.feature_scaler*4, stride=args.feature_scaler*4)
             mask_con = (mask_con > 0.5).float()
             mask_con = mask_con.reshape(B, -1)
             mask_con = mask_con.unsqueeze(1) 
 
-            # Plot sample images
+            # --- (Tùy chọn) Vẽ biểu đồ similarity giữa embedding và mask ---
             if iter_num % 200 == 0:
-                # mask = mask_con[0].cpu().detach().numpy().reshape(14, 14, 10)
-                # plot_samples(stud_features[0].cpu().detach().numpy(), mask, iter_num)
                 path2save = os.path.join(snapshot_path, 'BraTS19_similarity')
                 os.makedirs(path2save, exist_ok=True)
                 monitor.monitor_similarity_distributions(stud_embedding, mask_con, epoch=iter_num, path_prefix=path2save)
 
-            # # Incorporate uncertainty mask into the contrastive loss
-            # p_gs = dycon_losses.gambling_softmax(stud_logits) 
-            # entropy = -torch.sum(p_gs * torch.log(p_gs + 1e-6), dim=1, keepdim=True) 
-            # entropy = F.interpolate(entropy, scale_factor=1/(args.feature_scaler * 4), mode='trilinear', align_corners=False).squeeze(1)
-            # gambling_uncertainty = entropy.view(B, -1) 
-
+            # --- FeCLoss: contrastive loss với hard negative mining (khối xanh lá, L_FeCL) ---
             teacher_feat = ema_embedding if args.use_teacher_loss else None
             f_loss = fecl_criterion(feat=stud_embedding,
                                     mask=mask_con, 
                                     teacher_feat=teacher_feat,
                                     gambling_uncertainty=None, # gambling_uncertainty
                                     epoch=epoch_num)
+            # --- UnCLoss: contrastive loss cho unlabeled (khối xanh lá, L_UnCL) ---
             u_loss = uncl_criterion(stud_logits, ema_logits, beta)
+            # --- Consistency loss giữa student/teacher (khối xanh dương nhạt) ---
             consistency_loss = consistency_criterion(stud_probs[labeled_bs:], ema_probs[labeled_bs:]).mean()
             
             # Gather losses
             loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss)
 
-            # Check for NaN or Inf values
+            # === 9. Backward, update model ===
             if torch.isnan(loss) or torch.isinf(loss):
                 logging.warning(f"NaN or Inf found in loss at iteration {iter_num}")
                 continue
 
             optimizer.zero_grad()
             loss.backward()
-
-            # Apply gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Gradient clipping
             optimizer.step()
             
+            # --- EMA update: cập nhật teacher model từ student model (khối EMA, hình giữa) ---
             update_ema_variables(model, ema_model, args.ema_decay, iter_num)
 
             iter_num = iter_num + 1
              
+            # === 10. Logging các giá trị loss, metrics ===
             writer.add_scalar('info/loss', loss, iter_num)
             writer.add_scalar('info/f_loss', f_loss, iter_num)
             writer.add_scalar('info/u_loss', u_loss, iter_num)
@@ -280,7 +302,7 @@ if __name__ == "__main__":
             
             del noise, stud_embedding, ema_logits, ema_features, ema_probs, mask_con
 
-            # Batched Dice and HD95 metrics
+            # === 11. Đánh giá nhanh Dice, HD95 trên batch hiện tại ===
             with torch.no_grad():
                 outputs_bin = (stud_probs[:, 1, :, :, :] > 0.5).float()
                 dice_score = metrics.compute_dice(outputs_bin, label_batch)
@@ -295,6 +317,7 @@ if __name__ == "__main__":
                 'Iteration %d : Loss : %03f, Loss_CE: %03f, Loss_Dice: %03f, UnCLoss: %03f, FeCLoss: %03f, mean_dice: %03f, mean_hd95: %03f' %
                 (iter_num, loss.item(), loss_seg.item(), loss_seg_dice.item(), u_loss.item(), f_loss.item(), dice_score.mean().item(), np.mean(hausdorff_score).item()))
 
+            # === 12. Đánh giá toàn bộ validation set định kỳ, lưu model tốt nhất ===
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
                 avg_metric = test_3d_patch.var_all_case_BraTS19(model, args.root_dir, num_classes=args.num_classes, patch_size=patch_size, stride_xy=64, stride_z=64)
@@ -311,6 +334,7 @@ if __name__ == "__main__":
                 logging.info('Iteration %d : Dice: %03f Best_dice: %03f' % (iter_num, avg_metric, best_performance))
                 model.train()
 
+            # === 13. Lưu checkpoint định kỳ ===
             if iter_num % 3000 == 0:
                 save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                 torch.save(model.state_dict(), save_mode_path)

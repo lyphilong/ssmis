@@ -1,2 +1,6 @@
 BraTS2019/*
 *.h5
+models/
+code/wandb/
+*.pyc
+models/BraTS2019/UNET_3D_25labels_mse_gamma2.0_Focal_Teacher_temp0.6_beta0.5-5.0_max_iterations20000/

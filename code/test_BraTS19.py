@@ -77,7 +77,3 @@ if __name__ == '__main__':
 
 # python test_BraTS19.py --labelnum 25
 # python test_BraTS19.py --labelnum 25 --use_focal 0 --use_teacher_loss 0 --s_beta 3.0
-
-
-
-
