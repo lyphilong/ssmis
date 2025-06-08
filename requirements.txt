@@ -11,3 +11,15 @@ natsort==8.4.0
 # tqdm==4.67.1
 scikit-image==0.21.0
 nibabel==5.2.1
+gudhi
+
+torch==2.0.1
+torchvision==0.15.2
+ripser==0.6.4
+cripser
+gudhi==3.8.0
+SimpleITK==2.2.1
+tqdm==4.64.0
+numpy==1.26.4
+matplotlib==3.5.1
+PyYAML==6.0
