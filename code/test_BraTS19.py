@@ -43,6 +43,7 @@ snapshot_path = (
     f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}_temp{args.temp}"
     f"{beta_str}_max_iterations{args.max_iterations}"
 )
+snapshot_path = "/home/admin2022/ssd1/AE_Long/zim-research/data/DyCON/models/BraTS2019/UNET_3D_25labels_mse_gamma2.0_Focal_Teacher_Topo0.1_temp0.6_beta0.5-5.0_max_iterations20000/unet_3D_best_model.pth"
 test_save_path = "{}/{}_predictions/".format(snapshot_path, args.exp, args.labelnum, args.model)
 
 num_classes = 2

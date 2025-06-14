@@ -19,6 +19,8 @@ from torchvision import transforms as T
 from networks.net_factory_3d import net_factory_3d
 from utils import ramps, metrics, losses, dycon_losses, test_3d_patch, monitor
 from utils.topo_losses import getTopoLoss, getUncertaintyAwareTopoLoss
+# NEW: Advanced topology losses for conference submission
+from utils.advanced_topo_losses import create_advanced_topology_loss, UncertaintyAwareTopologyLossV2
 from dataloaders.brats19 import BraTS2019, SagittalToAxial, RandomCrop, RandomRotFlip, ToTensor, TwoStreamBatchSampler 
 
 import matplotlib.pyplot as plt
@@ -106,6 +108,13 @@ parser.add_argument('--use_uncertainty_topo', type=int, default=0, help='Use unc
 parser.add_argument('--uncertainty_threshold', type=float, default=0.7, help='Threshold for confidence/uncertainty separation')
 parser.add_argument('--topo_focus_mode', type=str, choices=['confident', 'uncertain'], default='confident', help='Focus on confident or uncertain regions')
 
+# === CONFERENCE: Advanced Topological Loss Parameters === #
+parser.add_argument('--use_advanced_topo', type=int, default=0, help='Use advanced topology loss for conference submission (1 for True, 0 for False)')
+parser.add_argument('--lambda_info', type=float, default=0.1, help='Weight for information-theoretic topology loss')
+parser.add_argument('--lambda_wasserstein', type=float, default=0.2, help='Weight for Wasserstein topology loss')
+parser.add_argument('--lambda_bayesian', type=float, default=0.15, help='Weight for Bayesian topology loss')
+parser.add_argument('--use_adaptive_weight', type=int, default=1, help='Use adaptive topology weighting (1 for True, 0 for False)')
+
 args = parser.parse_args()
 
 if args.s_beta is not None:
@@ -118,9 +127,16 @@ gamma_str = f"_gamma{args.gamma}" if bool(args.use_focal) else ""
 teacher_str = "Teacher" if bool(args.use_teacher_loss) else "NoTeacher"
 topo_str = f"_Topo{args.topo_weight}" if bool(args.use_topo_loss) else ""
 
+# NEW: Advanced topology string for path
+advanced_topo_str = ""
+if bool(args.use_advanced_topo):
+    advanced_topo_str = f"_AdvTopo_info{args.lambda_info}_wass{args.lambda_wasserstein}_bay{args.lambda_bayesian}"
+    if bool(args.use_adaptive_weight):
+        advanced_topo_str += "_adaptive"
+
 snapshot_path = (
     f"../models/{args.exp}/{args.model.upper()}_{args.labelnum}labels_"
-    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}{topo_str}_temp{args.temp}"
+    f"{args.consistency_type}{gamma_str}_{focal_str}_{teacher_str}{topo_str}{advanced_topo_str}_temp{args.temp}"
     f"{beta_str}_max_iterations{args.max_iterations}"
 )
 
@@ -152,7 +168,7 @@ def get_current_consistency_weight(epoch):
 def get_current_topo_weight(epoch):
     # Topological loss ramp-up similar to consistency ramp-up
     # Support both standard and uncertainty-aware topology loss
-    use_any_topo = bool(args.use_topo_loss) or bool(args.use_uncertainty_topo)
+    use_any_topo = bool(args.use_topo_loss) or bool(args.use_uncertainty_topo) or bool(args.use_advanced_topo)
     if not use_any_topo:
         return 0.0
     
@@ -278,6 +294,22 @@ if __name__ == "__main__":
     uncl_criterion = dycon_losses.UnCLoss()
     fecl_criterion = dycon_losses.FeCLoss(device=torch.device("cuda"), temperature=args.temp, gamma=args.gamma, use_focal=bool(args.use_focal), rampup_epochs=1500)
     
+    # NEW: Initialize advanced topology loss for conference submission
+    advanced_topo_loss = None
+    if bool(args.use_advanced_topo):
+        try:
+            config = {
+                'lambda_info': args.lambda_info,
+                'lambda_wasserstein': args.lambda_wasserstein,
+                'lambda_bayesian': args.lambda_bayesian,
+                'use_adaptive': bool(args.use_adaptive_weight)
+            }
+            advanced_topo_loss = create_advanced_topology_loss(device='cuda', config=config)
+            logging.info(f"Advanced topology loss initialized with config: {config}")
+        except Exception as e:
+            logging.warning(f"Failed to initialize advanced topology loss: {str(e)}")
+            advanced_topo_loss = None
+    
     # === Khởi tạo dict lưu các metric để vẽ biểu đồ ===
     metrics_history = {
         'loss': [],
@@ -294,6 +326,14 @@ if __name__ == "__main__":
         'val_Dice': [],
         'val_Best_dice': [],
         'train_Accuracy': [],
+        # NEW: Advanced topology metrics
+        'advanced_topo_total': [],
+        'advanced_topo_info': [],
+        'advanced_topo_wasserstein': [],
+        'advanced_topo_bayesian': [],
+        'advanced_topo_adaptive_factor': [],
+        'stu_uncertainty': [],
+        'tea_uncertainty': [],
     }
 
     for epoch_num in iterator:
@@ -527,13 +567,14 @@ if __name__ == "__main__":
             # --- Topological loss: đảm bảo nhất quán về cấu trúc topo giữa student và teacher ---
             topo_weight = get_current_topo_weight(iter_num//150)
             topo_loss = torch.tensor(0.0).cuda()
+            advanced_topo_losses = {}  # NEW: For advanced topology losses
             
-            # Support both standard and uncertainty-aware topology loss
-            use_any_topo = bool(args.use_topo_loss) or bool(args.use_uncertainty_topo)
+            # Support standard, uncertainty-aware, and advanced topology loss
+            use_any_topo = bool(args.use_topo_loss) or bool(args.use_uncertainty_topo) or bool(args.use_advanced_topo)
             
             # DEBUG: Log topology computation details
             if iter_num % 50 == 0:  # Log every 50 iterations
-                logging.info(f"[TOPO DEBUG] Iter {iter_num}: use_topo_loss={args.use_topo_loss}, use_uncertainty_topo={args.use_uncertainty_topo}, topo_weight={topo_weight:.6f}, labeled_bs={labeled_bs}")
+                logging.info(f"[TOPO DEBUG] Iter {iter_num}: use_topo_loss={args.use_topo_loss}, use_uncertainty_topo={args.use_uncertainty_topo}, use_advanced_topo={args.use_advanced_topo}, topo_weight={topo_weight:.6f}, labeled_bs={labeled_bs}")
             
             if use_any_topo and topo_weight > 0:
                 try:
@@ -609,6 +650,63 @@ if __name__ == "__main__":
                 except Exception as e:
                     logging.warning(f"Error computing topological loss at iteration {iter_num}: {str(e)}")
                     topo_loss = torch.tensor(0.0).cuda()
+                    
+                # NEW: Advanced topology loss computation for conference submission
+                if bool(args.use_advanced_topo) and advanced_topo_loss is not None:
+                    try:
+                        # Compute current training progress and dice score for adaptive weighting
+                        epoch_progress = min(1.0, iter_num / max_iterations) if max_iterations > 0 else 0.0
+                        
+                        # Estimate current dice score from recent validation or use default
+                        current_dice = best_performance if best_performance > 0 else 0.5
+                        
+                        # Process each sample in labeled batch
+                        advanced_topo_batch_loss = 0.0
+                        valid_advanced_samples = 0
+                        
+                        for b_idx in range(labeled_bs):
+                            # Get probability maps for this sample (middle slice)
+                            stu_prob_2d = stud_probs[b_idx, 1, :, :, stud_probs.shape[-1]//2]  # (H, W)
+                            tea_prob_2d = ema_probs[b_idx, 1, :, :, ema_probs.shape[-1]//2]   # (H, W)
+                            
+                            # Skip if insufficient variation
+                            stu_variation = stu_prob_2d.max() - stu_prob_2d.min()
+                            tea_variation = tea_prob_2d.max() - tea_prob_2d.min()
+                            
+                            if stu_variation > 0.1 and tea_variation > 0.1:
+                                # Compute advanced topology loss for this sample
+                                sample_losses = advanced_topo_loss(
+                                    stu_tensor=stu_prob_2d,
+                                    tea_tensor=tea_prob_2d,
+                                    epoch_progress=epoch_progress,
+                                    current_dice=current_dice
+                                )
+                                
+                                # Accumulate valid losses
+                                if not torch.isnan(sample_losses['total_advanced_topology']) and not torch.isinf(sample_losses['total_advanced_topology']):
+                                    advanced_topo_batch_loss += sample_losses['total_advanced_topology']
+                                    valid_advanced_samples += 1
+                                    
+                                    # Store individual component losses (only from first sample for logging)
+                                    if b_idx == 0 and iter_num % 50 == 0:
+                                        for key, value in sample_losses.items():
+                                            if key not in advanced_topo_losses:
+                                                advanced_topo_losses[key] = value
+                                            
+                        # Average over valid samples
+                        if valid_advanced_samples > 0:
+                            advanced_topo_final = advanced_topo_batch_loss / valid_advanced_samples
+                            # Add to total topology loss
+                            topo_loss = topo_loss + advanced_topo_final
+                            
+                            if iter_num % 50 == 0:
+                                logging.info(f"[ADVANCED TOPO] Final loss: {advanced_topo_final.item():.6f} (from {valid_advanced_samples} samples)")
+                        else:
+                            if iter_num % 50 == 0:
+                                logging.info(f"[ADVANCED TOPO] No valid samples for advanced topology")
+                                
+                    except Exception as e:
+                        logging.warning(f"Error computing advanced topological loss at iteration {iter_num}: {str(e)}")
             
             # Gather losses
             loss = args.l_weight * (loss_seg + loss_seg_dice) + consistency_weight * consistency_loss + args.u_weight * (f_loss + u_loss) + topo_weight * topo_loss
@@ -640,6 +738,16 @@ if __name__ == "__main__":
             writer.add_scalar('info/topo_loss', topo_loss, iter_num)
             writer.add_scalar('info/topo_weight', topo_weight, iter_num)
             
+            # NEW: Advanced topology tensorboard logging
+            if advanced_topo_losses:
+                writer.add_scalar('advanced_topo/total', advanced_topo_losses.get('total_advanced_topology', torch.tensor(0.0)).item(), iter_num)
+                writer.add_scalar('advanced_topo/info_theory', advanced_topo_losses.get('info_topology', torch.tensor(0.0)).item(), iter_num)
+                writer.add_scalar('advanced_topo/wasserstein', advanced_topo_losses.get('wasserstein_topology', torch.tensor(0.0)).item(), iter_num)
+                writer.add_scalar('advanced_topo/bayesian', advanced_topo_losses.get('bayesian_topology', torch.tensor(0.0)).item(), iter_num)
+                writer.add_scalar('advanced_topo/adaptive_factor', advanced_topo_losses.get('adaptive_factor', torch.tensor(1.0)).item(), iter_num)
+                writer.add_scalar('uncertainty/student_mean', advanced_topo_losses.get('stu_uncertainty_mean', torch.tensor(0.0)).item(), iter_num)
+                writer.add_scalar('uncertainty/teacher_mean', advanced_topo_losses.get('tea_uncertainty_mean', torch.tensor(0.0)).item(), iter_num)
+            
             # === Lưu các giá trị vào metrics_history để vẽ biểu đồ sau này ===
             metrics_history['loss'].append(loss.item())
             metrics_history['f_loss'].append(f_loss.item())
@@ -650,6 +758,25 @@ if __name__ == "__main__":
             metrics_history['consistency_weight'].append(consistency_weight)
             metrics_history['topo_loss'].append(topo_loss.item())
             metrics_history['topo_weight'].append(topo_weight)
+            
+            # NEW: Store advanced topology losses
+            if advanced_topo_losses:
+                metrics_history['advanced_topo_total'].append(advanced_topo_losses.get('total_advanced_topology', torch.tensor(0.0)).item())
+                metrics_history['advanced_topo_info'].append(advanced_topo_losses.get('info_topology', torch.tensor(0.0)).item())
+                metrics_history['advanced_topo_wasserstein'].append(advanced_topo_losses.get('wasserstein_topology', torch.tensor(0.0)).item())
+                metrics_history['advanced_topo_bayesian'].append(advanced_topo_losses.get('bayesian_topology', torch.tensor(0.0)).item())
+                metrics_history['advanced_topo_adaptive_factor'].append(advanced_topo_losses.get('adaptive_factor', torch.tensor(1.0)).item())
+                metrics_history['stu_uncertainty'].append(advanced_topo_losses.get('stu_uncertainty_mean', torch.tensor(0.0)).item())
+                metrics_history['tea_uncertainty'].append(advanced_topo_losses.get('tea_uncertainty_mean', torch.tensor(0.0)).item())
+            else:
+                # Fill with zeros if no advanced topology losses
+                metrics_history['advanced_topo_total'].append(0.0)
+                metrics_history['advanced_topo_info'].append(0.0)
+                metrics_history['advanced_topo_wasserstein'].append(0.0)
+                metrics_history['advanced_topo_bayesian'].append(0.0)
+                metrics_history['advanced_topo_adaptive_factor'].append(0.0)
+                metrics_history['stu_uncertainty'].append(0.0)
+                metrics_history['tea_uncertainty'].append(0.0)
 
             del noise, stud_embedding, ema_logits, ema_features, ema_probs, mask_con
 
@@ -673,11 +800,19 @@ if __name__ == "__main__":
             
             # Enhanced topology loss logging với uncertainty info
             if use_any_topo and topo_weight > 0:
-                if bool(args.use_uncertainty_topo):
+                if bool(args.use_advanced_topo) and advanced_topo_losses:
+                    topo_type = "Adv-Topo"
+                    info_loss = advanced_topo_losses.get('info_topology', torch.tensor(0.0)).item()
+                    wass_loss = advanced_topo_losses.get('wasserstein_topology', torch.tensor(0.0)).item()
+                    bay_loss = advanced_topo_losses.get('bayesian_topology', torch.tensor(0.0)).item()
+                    adaptive = advanced_topo_losses.get('adaptive_factor', torch.tensor(1.0)).item()
+                    topo_loss_str = f", {topo_type}: {topo_loss.item():.6f} (I:{info_loss:.4f},W:{wass_loss:.4f},B:{bay_loss:.4f},A:{adaptive:.3f})"
+                elif bool(args.use_uncertainty_topo):
                     topo_type = f"UA-Topo({args.topo_focus_mode})"
+                    topo_loss_str = f", {topo_type}: {topo_loss.item():.6f} (w={topo_weight:.6f})"
                 else:
                     topo_type = "Std-Topo"
-                topo_loss_str = f", {topo_type}: {topo_loss.item():.6f} (w={topo_weight:.6f})"
+                    topo_loss_str = f", {topo_type}: {topo_loss.item():.6f} (w={topo_weight:.6f})"
             else:
                 topo_loss_str = ""
             
@@ -704,7 +839,21 @@ if __name__ == "__main__":
             
             # Enhanced wandb logging cho uncertainty-aware topology
             if use_any_topo and topo_weight > 0:
-                if bool(args.use_uncertainty_topo):
+                if bool(args.use_advanced_topo) and advanced_topo_losses:
+                    wandb_metrics.update({
+                        'advanced_topo_total': advanced_topo_losses.get('total_advanced_topology', torch.tensor(0.0)).item(),
+                        'advanced_topo_info': advanced_topo_losses.get('info_topology', torch.tensor(0.0)).item(),
+                        'advanced_topo_wasserstein': advanced_topo_losses.get('wasserstein_topology', torch.tensor(0.0)).item(),
+                        'advanced_topo_bayesian': advanced_topo_losses.get('bayesian_topology', torch.tensor(0.0)).item(),
+                        'advanced_topo_adaptive_factor': advanced_topo_losses.get('adaptive_factor', torch.tensor(1.0)).item(),
+                        'stu_uncertainty_mean': advanced_topo_losses.get('stu_uncertainty_mean', torch.tensor(0.0)).item(),
+                        'tea_uncertainty_mean': advanced_topo_losses.get('tea_uncertainty_mean', torch.tensor(0.0)).item(),
+                        'topo_type': 'advanced_conference',
+                        'lambda_info': args.lambda_info,
+                        'lambda_wasserstein': args.lambda_wasserstein,
+                        'lambda_bayesian': args.lambda_bayesian
+                    })
+                elif bool(args.use_uncertainty_topo):
                     wandb_metrics.update({
                         'UA_topo_loss': topo_loss.item(),
                         'UA_topo_focus_mode': args.topo_focus_mode,
